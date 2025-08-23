@@ -1,34 +1,50 @@
+# PRESYNC PHASE: Database schema upgrades (run BEFORE main deployment)
 ---
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: upgrade-sql-schema-1-
+  name: upgrade-sql-schema-1
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/sync-wave: "-2"  # First schema upgrade
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
 spec:
   template:
     spec:
       containers:
         - name: upgrade-sql-schema
           image: alpine:latest
-          command: ["sleep", "5"]
+          command: ["sh", "-c", "echo 'Running schema upgrade 1'; sleep 5; echo 'Schema upgrade 1 completed'"]
       restartPolicy: Never
+  backoffLimit: 3
+
 ---
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: upgrade-sql-schema-2-
+  name: upgrade-sql-schema-2
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/sync-wave: "-1"  # Second schema upgrade (after first completes)
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
 spec:
   template:
     spec:
       containers:
         - name: upgrade-sql-schema
           image: alpine:latest
-          command: ["sleep", "5"]
+          command: ["sh", "-c", "echo 'Running schema upgrade 2'; sleep 5; echo 'Schema upgrade 2 completed'"]
       restartPolicy: Never
+  backoffLimit: 3
+
+# SYNC PHASE: Main application deployment with controlled order
 ---
 apiVersion: apps/v1
 kind: ReplicaSet
 metadata:
   name: backend
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"  # Deploy backend infrastructure first
 spec:
   replicas: 1
   selector:
@@ -42,11 +58,16 @@ spec:
       containers:
         - name: main
           image: nginx:latest
+          ports:
+            - containerPort: 8080
+
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: backend
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"  # Backend service with backend app
 spec:
   selector:
     tier: backend
@@ -54,25 +75,31 @@ spec:
     - protocol: TCP
       port: 8080
       targetPort: 8080
+
 ---
 apiVersion: batch/v1
 kind: Job
 metadata:
   name: maint-page-up
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"  # Put up maintenance page after backend is ready
 spec:
   template:
     spec:
       containers:
         - name: page-up
           image: alpine:latest
-          command: ["sleep", "2"]
+          command: ["sh", "-c", "echo 'Maintenance page is UP - blocking user traffic'; sleep 2"]
       restartPolicy: Never
   backoffLimit: 0
+
 ---
 apiVersion: apps/v1
 kind: ReplicaSet
 metadata:
   name: frontend
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"  # Deploy frontend after maintenance page is up
 spec:
   replicas: 1
   selector:
@@ -86,11 +113,16 @@ spec:
       containers:
         - name: main
           image: nginx:latest
+          ports:
+            - containerPort: 80
+
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: frontend
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"  # Frontend service with frontend app
 spec:
   selector:
     tier: frontend
@@ -98,16 +130,23 @@ spec:
     - protocol: TCP
       port: 80
       targetPort: 80
+
+# POSTSYNC PHASE: Cleanup and verification (run AFTER main deployment)
 ---
 apiVersion: batch/v1
 kind: Job
 metadata:
   name: maint-page-down
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/sync-wave: "0"  # Take down maintenance page after everything is deployed
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
 spec:
   template:
     spec:
       containers:
         - name: page-down
           image: alpine:latest
-          command: ["sleep", "2"]
+          command: ["sh", "-c", "echo 'Maintenance page is DOWN - allowing user traffic'; sleep 2"]
       restartPolicy: Never
+  backoffLimit: 0
